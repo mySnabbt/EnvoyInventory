@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const OpenAI = require("openai");
-const pool = require("./db");
+const supabase = require("./db");
 
 dotenv.config();
 const app = express();
@@ -10,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY
 });
 
 app.post("/ask", async (req, res) => {
@@ -19,56 +19,52 @@ app.post("/ask", async (req, res) => {
 
   try {
     const prompt = `
-You are an AI assistant that answers business questions using SQL.
-Given this question: "${question}"
-Generate a SQL query for PostgreSQL using a table named "orders" with columns: 
+You are an assistant that helps generate SQL queries for a retail inventory system. Convert the question into a SQL query compatible with PostgreSQL.
+The table is 'orders' and it is located in the schema 'pos'.
+The relevant columns in 'orders' are:
 - order_id (integer)
 - customer_id (integer)
 - order_date (timestamp)
 - total (numeric)
-- status(text)
+- status (text)
 
+Only return the SQL query in a code block like this:
+\`\`\`sql
+SELECT * FROM pos.orders ...
+\`\`\`
 
-Only give the SQL query in your response.
+Question: "${question}"
 `;
 
     const gptRes = await openai.chat.completions.create({
-      model: "gpt-4", // make sure it's this
+      model: "gpt-4",
       messages: [{ role: "user", content: prompt }],
     });
 
-    console.log("Raw GPT response:", gptRes); // <== log everything
+    const rawText = gptRes.choices?.[0]?.message?.content?.trim();
+    console.log("Raw GPT response:\n", rawText);
 
-    if (!gptRes || !gptRes.choices || gptRes.choices.length === 0) {
-      throw new Error("No valid response from OpenAI");
-    }
-
-    const rawText = gptRes.choices[0].message.content.trim();
-    console.log("Raw SQL output from AI:\n", rawText);
-
-    const sql = rawText.replace(/```sql|```/g, "").trim();
+    const sql = rawText.replace(/```sql|```/g, "").trim().replace(/;$/, "");
     console.log("Cleaned SQL:\n", sql);
 
-    const fixedSql = sql.replace(/\borders\b/g, "pos.orders");
-    console.log("Final SQL with schema fix:\n", fixedSql);
-    const result = await pool.query(fixedSql);
+    console.log("Sending SQL to Supabase RPC...");
+    const { data, error } = await supabase.rpc('execute_raw_sql', { sql_text: sql });
 
-    res.json({ sql, result: result.rows });
+    if (error) {
+      console.error("Supabase error:", error);
+      return res.status(500).json({ error: "Supabase query failed", detail: error.message });
+    }
+
+    const unpacked = data?.[0]?.result?.[0]; // safely unpack the JSON array inside
+    console.log("Received response from Supabase:", unpacked);
+    return res.json({ result: unpacked });
 
   } catch (err) {
-    console.error("Error in /ask:", err.message);
-    res.status(500).json({
-      error: "AI or DB error",
-      details: err.message,
-    });
+    console.error("Error in /ask:", err);
+    res.status(500).json({ error: "Failed to execute SQL", detail: err.message });
   }
 });
 
-
-app.get("/", (req, res) => {
-    res.send("AI Analytics Backend is running ✅");
-  });  
-
-app.listen(process.env.PORT, () =>
-  console.log(`Server running on port ${process.env.PORT}`)
-);
+app.listen(5000, () => {
+  console.log("Server running on port 5000");
+});
