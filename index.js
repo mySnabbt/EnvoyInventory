@@ -1,7 +1,10 @@
-// index.js
+import dotenv from 'dotenv';
+dotenv.config();
+
+
 import express  from 'express';
-import cors     from 'cors';
-import dotenv   from 'dotenv';
+import cors     from 'cors';       
+import bcrypt   from 'bcryptjs';  
 import OpenAI   from 'openai';
 import supabase from './db.js';
 
@@ -21,22 +24,22 @@ function buildPrompt(question) {
 You are an assistant that helps generate SQL queries for a retail inventory system.
 Convert the question into a SQL query compatible with PostgreSQL.
 
-The table is 'orders' and is located in the schema 'pos'.
-Relevant columns:
-- order_id (integer)
-- customer_id (integer)
-- order_date (timestamp)
-- total (numeric)
-- status (text)
+The tables are:
+- pos.orders       (order_id, customer_id, order_date, total, status)
+- pos.order_items  (order_item_id, order_id, product_id, quantity, price_each)
+- pos.products     (product_id, product_name, sku, price, stock)
 
-Only return the SQL query in a code block like this:
+Only return the SQL, wrapped in a sql-fenced code block. No comments or explanation:
+
 \`\`\`sql
-SELECT * FROM pos.orders ...
+-- your query here
 \`\`\`
 
 Question: "${question}"
 `;
 }
+
+
 
 /**
  * POST /ask
@@ -48,13 +51,28 @@ app.post('/ask', async (req, res) => {
   console.log('🔍 Received question:', question);
 
   try {
-    const prompt   = buildPrompt(question);
-    const gptRes   = await openai.chat.completions.create({
+    const prompt = buildPrompt(question);
+
+    // 1) Declare gptRes here
+    const gptRes = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [{ role: 'user', content: prompt }],
     });
-    const rawText  = gptRes.choices?.[0]?.message?.content?.trim() || '';
-    const sql      = rawText.replace(/```sql|```/g, '').trim().replace(/;$/, '');
+
+    // 2) Use the same variable name
+    const rawText = gptRes.choices?.[0]?.message?.content?.trim() || '';
+
+    // extract only the SQL
+    let sql = '';
+    const match = rawText.match(/```sql([\s\S]*?)```/i);
+    if (match) {
+      sql = match[1].trim();
+    } else {
+      const idx = rawText.toUpperCase().indexOf('SELECT');
+      sql = idx >= 0 ? rawText.slice(idx).trim() : rawText.trim();
+    }
+    sql = sql.replace(/;$/, '');
+
     if (!sql) throw new Error('No SQL extracted from GPT response.');
 
     console.log('📄 Executing SQL:', sql);
@@ -64,7 +82,6 @@ app.post('/ask', async (req, res) => {
       return res.status(500).json({ error: 'Supabase query failed', detail: error.message });
     }
 
-    // The RPC returns an array of { result: [...] }
     const flatResult = data?.[0]?.result ?? [];
     console.log('✅ Query result:', flatResult);
 
@@ -74,6 +91,7 @@ app.post('/ask', async (req, res) => {
     res.status(500).json({ error: 'Failed to execute SQL', detail: err.message });
   }
 });
+
 
 /**
  * GET /sales?date=YYYY-MM-DD
@@ -152,6 +170,173 @@ app.get('/revenue/monthly', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch monthly revenue' });
   }
 });
+// GET /users — list all users
+app.get('/users', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('users')
+      .select('user_id, first_name, last_name, email, designation');
+    if (error) throw error;
+    res.json({ users: data });
+  } catch (err) {
+    console.error('Error fetching users:', err);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// POST /users — add a new user
+/**
+ * POST /users
+ * Body: { first_name, last_name, email, designation, plainPassword }
+ * Inserts a new user with a bcrypt-hashed password.
+ */
+app.post('/users', async (req, res) => {
+  try {
+    const {
+      first_name,
+      last_name,
+      email,
+      designation,
+      plainPassword,
+      role_id
+    } = req.body;
+
+    // 1. Validate required fields
+    if (!first_name || !last_name || !email || !plainPassword) {
+      return res
+        .status(400)
+        .json({ error: 'first_name, last_name, email and password are required' });
+    }
+
+    // 2. Hash the password
+    const password_hash = await bcrypt.hash(plainPassword, 10);
+
+    // 3. Default role_id to 1 if missing
+    const newRoleId = role_id ?? 1;
+
+    // 4. Insert into pos.users
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('users')
+      .insert({
+        first_name,
+        last_name,
+        email,
+        designation,
+        password_hash,
+        role_id: newRoleId
+      })
+      .select('user_id, first_name, last_name, email, designation, role_id')
+      .single();
+
+    if (error) throw error;
+
+    // 5. Return the created user (sans hash)
+    res.status(201).json({ user: data });
+  } catch (err) {
+    console.error('Error creating user:', err);
+    res
+      .status(500)
+      .json({ error: 'Failed to create user', detail: err.message });
+  }
+});
+
+// PATCH /users/:id — update designation
+app.patch('/users/:id', async (req, res) => {
+  try {
+    const {
+      user_id,
+      first_name,
+      last_name,
+      email,
+      designation,
+      plainPassword
+    } = req.body;
+
+    // Build an updates object containing only the fields they actually sent
+    const updates = {};
+    if (user_id && user_id !== Number(req.params.id)) {
+      updates.user_id = user_id;
+    }
+    if (first_name)  updates.first_name  = first_name;
+    if (last_name)   updates.last_name   = last_name;
+    if (email)       updates.email       = email;
+    if (designation) updates.designation = designation;
+
+    // If they provided a new password, hash it
+    if (plainPassword) {
+      updates.password_hash = await bcrypt.hash(plainPassword, 10);
+    }
+
+    // Make sure there's something to update
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    // Perform the update
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('users')
+      .update(updates)
+      .eq('user_id', req.params.id)
+      .select('user_id, first_name, last_name, email, designation')
+      .single();
+
+    if (error) throw error;
+
+    res.json({ user: data });
+  } catch (err) {
+    console.error('Error updating user:', err);
+    res.status(500).json({ error: 'Failed to update user', detail: err.message });
+  }
+});
+
+// DELETE /users/:id — remove a user
+app.delete('/users/:id', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .schema('pos')
+      .from('users')
+      .delete()
+      .eq('user_id', req.params.id);
+    if (error) throw error;
+    res.status(204).end();
+  } catch (err) {
+    console.error('Error deleting user:', err);
+    res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
+
+// GET /orders/:orderId/items  — list all items for a specific order
+// GET /orders/:orderId/items 
+app.get('/orders/:orderId/items', async (req, res) => {
+  try {
+    const orderId = req.params.orderId;
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('order_items')
+      .select(`
+        order_item_id,
+        product_id,
+        quantity,
+        price_each,
+        products (
+          product_name
+        )
+      `)
+      .eq('order_id', orderId);
+
+    if (error) throw error;
+    res.json({ orderItems: data });
+  } catch (err) {
+    console.error('Error fetching order items:', err);
+    res.status(500).json({ error: 'Failed to fetch order items', detail: err.message });
+  }
+});
+
+
 
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
