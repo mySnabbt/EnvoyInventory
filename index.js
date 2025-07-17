@@ -1,7 +1,5 @@
 import dotenv from 'dotenv';
 dotenv.config();
-
-
 import express  from 'express';
 import cors     from 'cors';       
 import bcrypt   from 'bcryptjs';  
@@ -21,76 +19,109 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
  */
 function buildPrompt(question) {
   return `
-You are an assistant that helps generate SQL queries for a retail inventory system.
-Convert the question into a SQL query compatible with PostgreSQL.
-
-The tables are:
-- pos.orders       (order_id, customer_id, order_date, total, status)
+You are a SQL–generation assistant for a PostgreSQL retail system.
+Tables:
+- pos.orders       (order_id, customer_id, order_date TIMESTAMP, total, status)
 - pos.order_items  (order_item_id, order_id, product_id, quantity, price_each)
 - pos.products     (product_id, product_name, sku, price, stock)
 
-Only return the SQL, wrapped in a sql-fenced code block. No comments or explanation:
+Always return ONLY the SQL (no explanation), wrapped in a \`\`\`sql\`\`\` block.
 
-\`\`\`sql
--- your query here
-\`\`\`
+Guidelines:
+• If the user asks for data “on” a specific date (e.g. 2025-07-14), filter timestamps either by:
+    – Applying \`DATE(order_date) = 'YYYY-MM-DD'\`
+    – Or using a range: \`order_date >= 'YYYY-MM-DD 00:00:00' AND order_date < 'YYYY-MM-DD 00:00:00' + INTERVAL '1 DAY'\`
+• If the user refers to an **order** by ID (e.g. “order 123”), only filter on \`o.order_id = 123\`.  
+• If the user asks about **inventory** (e.g. “worth of snack 1 in inventory”), treat it as a product question: you may use \`p.stock > 0\` or compute \`p.stock * p.price\`.  
+• Don’t mix inventory filters into order queries.  
+• Only include the necessary columns and JOINs.  
+• Use table aliases: \`o\` for orders, \`oi\` for order_items, \`p\` for products.
 
 Question: "${question}"
 `;
 }
 
 
-
 /**
  * POST /ask
- * Accepts { question } in the body, asks GPT-4 for SQL, runs it in Supabase,
+ * Accepts { question } in the body, asks InventoyButler for SQL, runs it in Supabase,
  * and returns { result, sqlQuery }.
  */
 app.post('/ask', async (req, res) => {
   const { question } = req.body;
-  console.log('🔍 Received question:', question);
+  console.log('📩 Received:', question);
+
+  const startTime = Date.now();
 
   try {
-    const prompt = buildPrompt(question);
+    // 1. Create a thread
+    const thread = await openai.beta.threads.create();
+    console.log('🧵 Thread created:', thread.id);
 
-    // 1) Declare gptRes here
-    const gptRes = await openai.chat.completions.create({
-      model: 'gpt-4',
-      messages: [{ role: 'user', content: prompt }],
+    // 2. Add user message to thread
+    await openai.beta.threads.messages.create(thread.id, {
+      role: 'user',
+      content: question,
     });
+    console.log('✉️ Message added to thread.');
 
-    // 2) Use the same variable name
-    const rawText = gptRes.choices?.[0]?.message?.content?.trim() || '';
+    // 3. Run the assistant on the thread
+    const run = await openai.beta.threads.runs.create(thread.id, {
+      assistant_id: process.env.OPENAI_ASSISTANT_ID,
+    });
+    console.log('🚀 Run started:', run.id);
 
-    // extract only the SQL
+    // 4. Poll for completion
+    let runStatus = run.status;
+    while (runStatus !== 'completed' && runStatus !== 'failed') {
+      await new Promise(r => setTimeout(r, 1000));
+      const updatedRun = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+      runStatus = updatedRun.status;
+      console.log(`🔄 Run status: ${runStatus}`);
+    }
+
+    if (runStatus === 'failed') {
+      throw new Error('Assistant run failed.');
+    }
+
+    // 5. Retrieve assistant’s latest response
+    const messages = await openai.beta.threads.messages.list(thread.id);
+    const latest = messages.data.find(m => m.role === 'assistant')?.content?.[0]?.text?.value || '';
+    console.log('💬 Assistant response:', latest);
+
+    // 6. Extract SQL
     let sql = '';
-    const match = rawText.match(/```sql([\s\S]*?)```/i);
+    const match = latest.match(/```sql([\s\S]*?)```/i);
     if (match) {
       sql = match[1].trim();
     } else {
-      const idx = rawText.toUpperCase().indexOf('SELECT');
-      sql = idx >= 0 ? rawText.slice(idx).trim() : rawText.trim();
+      const idx = latest.toUpperCase().indexOf('SELECT');
+      sql = idx >= 0 ? latest.slice(idx).trim() : latest.trim();
     }
     sql = sql.replace(/;$/, '');
+    if (!sql) throw new Error('❌ No SQL found in assistant response.');
+    console.log('📄 Extracted SQL:', sql);
 
-    if (!sql) throw new Error('No SQL extracted from GPT response.');
-
-    console.log('📄 Executing SQL:', sql);
+    // 7. Run it on Supabase
     const { data, error } = await supabase.rpc('execute_raw_sql', { sql_text: sql });
     if (error) {
       console.error('❌ Supabase error:', error);
       return res.status(500).json({ error: 'Supabase query failed', detail: error.message });
     }
 
-    const flatResult = data?.[0]?.result ?? [];
-    console.log('✅ Query result:', flatResult);
+    console.log(`📊 Supabase returned ${data?.[0]?.result?.length ?? 0} rows.`);
 
-    res.json({ result: flatResult, sqlQuery: sql });
+    const endTime = Date.now();
+    console.log(`✅ Request completed in ${endTime - startTime}ms`);
+
+    res.json({ result: data?.[0]?.result ?? [], sqlQuery: sql });
+
   } catch (err) {
-    console.error('🔥 Error in /ask:', err);
-    res.status(500).json({ error: 'Failed to execute SQL', detail: err.message });
+    console.error('🔥 Assistant error:', err);
+    res.status(500).json({ error: 'Failed to process request', detail: err.message });
   }
 });
+
 
 
 /**
@@ -136,7 +167,8 @@ app.get('/products', async (req, res) => {
     const { data, error } = await supabase
       .schema('pos')
       .from('products')
-      .select('*');
+      .select('*')
+      .eq('is_active', true);
     if (error) throw error;
     res.json({ products: data });
   } catch (err) {
@@ -335,6 +367,75 @@ app.get('/orders/:orderId/items', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch order items', detail: err.message });
   }
 });
+
+// POST   /products         — create a new product
+app.post('/products', async (req, res) => {
+  try {
+    const { product_name, sku, category_id, price, stock } = req.body;
+    if (!product_name || !sku || price == null || stock == null) {
+      return res.status(400).json({ error: 'product_name, sku, price and stock are required' });
+    }
+
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('products')
+      .insert({ product_name, sku, category_id, price, stock })
+      .select('*')
+      .single();
+
+    if (error) throw error;
+    res.status(201).json({ product: data });
+  } catch (err) {
+    console.error('Error creating product:', err);
+    res.status(500).json({ error: 'Failed to create product', detail: err.message });
+  }
+});
+
+// PATCH  /products/:id     — update an existing product
+app.patch('/products/:id', async (req, res) => {
+  try {
+    const updates = {};
+    ['product_name','sku','category_id','price','stock'].forEach(field => {
+      if (req.body[field] != null) updates[field] = req.body[field];
+    });
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('products')
+      .update(updates)
+      .eq('product_id', req.params.id)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+    res.json({ product: data });
+  } catch (err) {
+    console.error('Error updating product:', err);
+    res.status(500).json({ error: 'Failed to update product', detail: err.message });
+  }
+});
+
+
+// “Delete” => soft delete
+app.delete('/products/:id', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .schema('pos')
+      .from('products')
+      .update({ is_active: false })
+      .eq('product_id', req.params.id);
+
+    if (error) throw error;
+    return res.status(204).end();
+  } catch (err) {
+    console.error('Error soft-deleting product:', err);
+    return res.status(500).json({ error: 'Failed to delete product', detail: err.message });
+  }
+});
+
 
 
 
