@@ -5,6 +5,7 @@ import cors     from 'cors';
 import bcrypt   from 'bcryptjs';  
 import OpenAI   from 'openai';
 import supabase from './db.js';
+import jwt from 'jsonwebtoken'
 
 dotenv.config();
 
@@ -13,6 +14,135 @@ app.use(cors());
 app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    let role = req.user?.role;
+    if (typeof role === 'string') {
+      role = parseInt(role, 10);
+    }
+    if (!role || !allowedRoles.includes(role)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    next();
+  };
+}
+
+
+app.patch(
+  '/users/:id',
+  authenticate,
+  requireRole(2, 3),
+  async (req, res) => {
+    const targetId = Number(req.params.id);
+    // 1) fetch the target user to see their current role
+    const { data: target, error: fetchErr } = await supabase
+      .schema('pos')
+      .from('users')
+      .select('role_id')
+      .eq('user_id', targetId)
+      .single();
+
+    if (fetchErr) return res.status(500).json({ error: fetchErr.message });
+
+    // 2) if a manager (2) tries to edit an admin (3), forbid
+    if (req.user.role === 2 && target.role_id === 3) {
+      return res.status(403).json({ error: 'Cannot edit administrator' });
+    }
+
+    // 3) if a manager tries to set someone to admin, forbid
+    if (
+      req.user.role === 2 &&
+      req.body.role_id === 3
+    ) {
+      return res.status(403).json({ error: 'Managers cannot assign Administrator' });
+    }
+
+    // 4) now proceed with building your updates object
+    const updates = {};
+    if (req.body.first_name) updates.first_name = req.body.first_name;
+    if (req.body.last_name)  updates.last_name  = req.body.last_name;
+    if (req.body.designation) updates.designation = req.body.designation;
+    if (req.body.plainPassword) {
+      updates.password_hash = await bcrypt.hash(req.body.plainPassword, 10);
+    }
+    if (req.body.role_id) {
+      updates.role_id = req.body.role_id;
+    }
+    // … validate at least one field to update …
+
+    // 5) perform the update
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('users')
+      .update(updates)
+      .eq('user_id', targetId)
+      .select('user_id, first_name, last_name, email, designation, role_id')
+      .single();
+
+    if (error) throw error;
+    res.json({ user: data });
+  }
+);
+
+
+
+
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
+  // fetch the user record (including password_hash)
+  const { data: user, error } = await supabase
+    .schema('pos')
+    .from('users')
+    .select('user_id, first_name, last_name, email, password_hash, role_id, designation')
+    .eq('email', email)
+    .single();
+
+  if (error || !user) return res.status(401).json({ error: 'Invalid credentials' });
+
+  // compare password
+  const valid = await bcrypt.compare(password, user.password_hash);
+  if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+
+  // sign a token (expires in 1h)
+  const token = jwt.sign(
+    { sub: user.user_id, email: user.email, role: user.role_id },
+    process.env.JWT_SECRET,
+    { expiresIn: '1h' }
+  );
+
+  // return token plus any user info you want front end to know
+  res.json({
+    token,
+    user: {
+        user_id:    user.user_id,
+        first_name: user.first_name,
+        last_name:  user.last_name,
+        email:      user.email,
+        designation:user.designation,
+        role_id:    user.role_id    // ← include the role
+      }
+  });
+});
+
+function authenticate(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const parts = auth.split(' ');
+  if (parts.length !== 2 || parts[0] !== 'Bearer') return res.status(401).end();
+
+  try {
+    const payload = jwt.verify(parts[1], process.env.JWT_SECRET);
+    req.user = payload;    // you can read req.user.sub and req.user.role later
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+
 
 /**
  * Build a GPT prompt to turn a natural-language question into SQL.
@@ -203,19 +333,23 @@ app.get('/revenue/monthly', async (req, res) => {
   }
 });
 // GET /users — list all users
-app.get('/users', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .schema('pos')
-      .from('users')
-      .select('user_id, first_name, last_name, email, designation');
-    if (error) throw error;
-    res.json({ users: data });
-  } catch (err) {
-    console.error('Error fetching users:', err);
-    res.status(500).json({ error: 'Failed to fetch users' });
+// GET /users — list all users
+app.get('/users', authenticate,
+  async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .schema('pos')
+        .from('users')
+        .select('user_id, first_name, last_name, email, designation, role_id');
+      if (error) throw error;
+      res.json({ users: data });
+    } catch (err) {
+      console.error('Error fetching users:', err);
+      res.status(500).json({ error: 'Failed to fetch users' });
+    }
   }
-});
+);
+
 
 // POST /users — add a new user
 /**
@@ -223,7 +357,12 @@ app.get('/users', async (req, res) => {
  * Body: { first_name, last_name, email, designation, plainPassword }
  * Inserts a new user with a bcrypt-hashed password.
  */
-app.post('/users', async (req, res) => {
+app.post('/users', authenticate,
+  requireRole(2, 3), 
+  async (req, res) => {
+     if (req.user.role === 2 && req.body.role_id === 3) {
+      return res.status(403).json({ error: 'Managers cannot assign Administrator' });
+    }
   try {
     const {
       first_name,
@@ -274,56 +413,6 @@ app.post('/users', async (req, res) => {
   }
 });
 
-// PATCH /users/:id — update designation
-app.patch('/users/:id', async (req, res) => {
-  try {
-    const {
-      user_id,
-      first_name,
-      last_name,
-      email,
-      designation,
-      plainPassword
-    } = req.body;
-
-    // Build an updates object containing only the fields they actually sent
-    const updates = {};
-    if (user_id && user_id !== Number(req.params.id)) {
-      updates.user_id = user_id;
-    }
-    if (first_name)  updates.first_name  = first_name;
-    if (last_name)   updates.last_name   = last_name;
-    if (email)       updates.email       = email;
-    if (designation) updates.designation = designation;
-
-    // If they provided a new password, hash it
-    if (plainPassword) {
-      updates.password_hash = await bcrypt.hash(plainPassword, 10);
-    }
-
-    // Make sure there's something to update
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: 'No valid fields to update' });
-    }
-
-    // Perform the update
-    const { data, error } = await supabase
-      .schema('pos')
-      .from('users')
-      .update(updates)
-      .eq('user_id', req.params.id)
-      .select('user_id, first_name, last_name, email, designation')
-      .single();
-
-    if (error) throw error;
-
-    res.json({ user: data });
-  } catch (err) {
-    console.error('Error updating user:', err);
-    res.status(500).json({ error: 'Failed to update user', detail: err.message });
-  }
-});
-
 // DELETE /users/:id — remove a user
 app.delete('/users/:id', async (req, res) => {
   try {
@@ -342,7 +431,6 @@ app.delete('/users/:id', async (req, res) => {
 
 
 // GET /orders/:orderId/items  — list all items for a specific order
-// GET /orders/:orderId/items 
 app.get('/orders/:orderId/items', async (req, res) => {
   try {
     const orderId = req.params.orderId;
