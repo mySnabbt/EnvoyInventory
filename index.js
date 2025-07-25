@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken'
 dotenv.config();
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
@@ -456,8 +457,10 @@ app.get('/orders/:orderId/items', async (req, res) => {
   }
 });
 
+
 // POST   /products         — create a new product
-app.post('/products', async (req, res) => {
+app.post('/products', authenticate, requireRole(2, 3), async (req, res) => {
+  console.log('🔍 Received product:', req.body);
   try {
     const { product_name, sku, category_id, price, stock } = req.body;
     if (!product_name || !sku || price == null || stock == null) {
