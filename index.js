@@ -527,6 +527,154 @@ app.delete('/products/:id', async (req, res) => {
   }
 });
 
+// GET /inventory
+app.get('/inventory', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('product_vendors')
+      .select(`
+        product_id,
+        vendor_id,
+        supply_price,
+        lead_time_days,
+        preferred,
+        vendors (vendor_name, is_active),
+        products (product_name, sku, stock)
+      `);
+
+    if (error) throw error;
+
+    const inventory = data
+      .filter(row => row.vendors?.is_active) // ✅ filter out inactive vendors
+      .map(row => ({
+        product_id: row.product_id,
+        sku: row.products?.sku,
+        product_name: row.products?.product_name,
+        stock: row.products?.stock,
+        vendor_name: row.vendors?.vendor_name,
+        supply_price: row.supply_price,
+        preferred: row.preferred,
+        lead_time_days: row.lead_time_days
+      }));
+
+    res.json({ inventory });
+  } catch (err) {
+    console.error('Error fetching inventory:', err);
+    res.status(500).json({ error: 'Failed to fetch inventory' });
+  }
+});
+
+
+
+// GET /vendors
+app.get('/vendors', authenticate, async (req, res) => {
+  const { data, error } = await supabase
+    .schema('pos')
+    .from('vendors')
+    .select('*');
+
+  if (error) {
+    console.error('Error fetching vendors:', error);
+    return res.status(500).json({ error: error.message });
+  }
+
+  res.json({ vendors: data });
+});
+
+
+// POST /inventory/order — create restock order
+app.post('/inventory/order', authenticate, async (req, res) => {
+  const { product_id, vendor_id, quantity } = req.body;
+  const user_id = req.user.sub;
+
+  const { data, error } = await supabase
+    .schema('pos')
+    .from('restock_orders')
+    .insert({
+      product_id,
+      vendor_id,
+      quantity,
+      requested_by: user_id
+    })
+    .select('*')
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json({ order: data });
+});
+
+// GET /vendors — only active
+app.get('/vendors', authenticate, async (req, res) => {
+  const { data, error } = await supabase
+    .schema('pos')
+    .from('vendors')
+    .select('*')
+    .eq('is_active', true); // ✅ only active
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ vendors: data });
+});
+
+// POST /vendors — create new vendor
+app.post('/vendors', authenticate, async (req, res) => {
+  const { vendor_name, contact_email, contact_phone, address } = req.body;
+
+  if (!vendor_name || vendor_name.trim() === '') {
+    return res.status(400).json({ error: 'Vendor name is required' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('vendors')
+      .insert({
+        vendor_name: vendor_name.trim(),
+        contact_email: contact_email || null,
+        contact_phone: contact_phone || null,
+        address: address || null
+      })
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    res.status(201).json({ vendor: data });
+  } catch (err) {
+    console.error('Error creating vendor:', err);
+    res.status(500).json({ error: 'Failed to create vendor', detail: err.message });
+  }
+});
+
+
+// PATCH /vendors/:id — update existing vendor
+app.patch('/vendors/:id', authenticate, async (req, res) => {
+  const updates = {};
+  ['vendor_name', 'contact_email', 'contact_phone', 'address'].forEach(field => {
+    if (req.body[field] != null) updates[field] = req.body[field];
+  });
+
+  const { data, error } = await supabase
+    .schema('pos')
+    .from('vendors')
+    .update(updates)
+    .eq('vendor_id', req.params.id)
+    .select('*')
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ vendor: data });
+});
+
+// DELETE /vendors/:id — soft delete
+app.delete('/vendors/:id', authenticate, async (req, res) => {
+  const { error } = await supabase
+    .schema('pos')
+    .from('vendors')
+    .update({ is_active: false })
+    .eq('vendor_id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(204).end();
+});
 
 
 
