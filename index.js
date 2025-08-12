@@ -586,23 +586,80 @@ app.get('/inventory', authenticate, async (req, res) => {
   }
 });
 
+// PATCH /inventory/:productId/vendor — upsert or update vendor link for a product
+app.patch('/inventory/:productId/vendor', authenticate, async (req, res) => {
+  try {
+    const productId = Number(req.params.productId);
+    const { vendor_id, preferred, lead_time_days } = req.body;
+
+    if (!productId || !vendor_id) {
+      return res.status(400).json({ error: 'productId and vendor_id are required' });
+    }
+
+    // 1) Upsert/insert the row for this product/vendor
+    const upsertPayload = {
+      product_id: productId,
+      vendor_id,
+      preferred: !!preferred,
+      lead_time_days: lead_time_days ?? null
+    };
+
+    const { data: upsertData, error: upsertErr } = await supabase
+      .schema('pos')
+      .from('product_vendors')
+      .upsert(upsertPayload, { onConflict: 'product_id,vendor_id' })
+      .select('*');
+
+    if (upsertErr) throw upsertErr;
+
+    // 2) If this vendor is marked preferred, unset preferred for the rest
+    if (preferred === true) {
+      const { error: clearErr } = await supabase
+        .schema('pos')
+        .from('product_vendors')
+        .update({ preferred: false })
+        .eq('product_id', productId)
+        .neq('vendor_id', vendor_id);
+
+      if (clearErr) throw clearErr;
+    }
+
+    res.json({ ok: true, vendorLink: upsertData?.[0] ?? null });
+  } catch (err) {
+    console.error('Update vendor link failed:', err);
+    res.status(500).json({ error: 'Failed to update vendor for product' });
+  }
+});
 
 
 
 // GET /vendors
 app.get('/vendors', authenticate, async (req, res) => {
-  const { data, error } = await supabase
-    .schema('pos')
-    .from('vendors')
-    .select('*');
+  try {
+    const active = req.query.active; // 'true' | 'false' | 'all' | undefined
+    let q = supabase
+      .schema('pos')
+      .from('vendors')
+      .select('*');
 
-  if (error) {
-    console.error('Error fetching vendors:', error);
-    return res.status(500).json({ error: error.message });
+    if (active === 'true') {
+      q = q.eq('is_active', true);
+    } else if (active === 'false') {
+      q = q.eq('is_active', false);
+    }
+    // else: return all vendors
+
+    const { data, error } = await q;
+
+    if (error) throw error;
+
+    res.json({ vendors: data });
+  } catch (err) {
+    console.error('Error fetching vendors:', err);
+    res.status(500).json({ error: err.message });
   }
-
-  res.json({ vendors: data });
 });
+
 
 
 // POST /inventory/order — create restock order
@@ -688,8 +745,11 @@ app.post('/vendors', authenticate, async (req, res) => {
 // PATCH /vendors/:id — update existing vendor
 app.patch('/vendors/:id', authenticate, async (req, res) => {
   const updates = {};
-  ['vendor_name', 'contact_email', 'contact_phone', 'address'].forEach(field => {
-    if (req.body[field] != null) updates[field] = req.body[field];
+
+  ['vendor_name', 'contact_email', 'contact_phone', 'address', 'is_active'].forEach(field => {
+    if (req.body[field] != null) {
+      updates[field] = req.body[field];
+    }
   });
 
   const { data, error } = await supabase
@@ -700,9 +760,13 @@ app.patch('/vendors/:id', authenticate, async (req, res) => {
     .select('*')
     .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
   res.json({ vendor: data });
 });
+
 
 // DELETE /vendors/:id — soft delete
 app.delete('/vendors/:id', authenticate, async (req, res) => {
