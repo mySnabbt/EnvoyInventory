@@ -483,12 +483,22 @@ app.post('/products', authenticate, requireRole(2, 3), async (req, res) => {
 });
 
 // PATCH  /products/:id     — update an existing product
-app.patch('/products/:id', async (req, res) => {
+// PATCH  /products/:id
+app.patch('/products/:id', authenticate, requireRole(2, 3), async (req, res) => {
   try {
     const updates = {};
-    ['product_name','sku','category_id','price','stock'].forEach(field => {
+    const updatable = ['product_name','sku','category_id','price','stock','is_active']; // ← add is_active
+
+    updatable.forEach((field) => {
       if (req.body[field] != null) updates[field] = req.body[field];
     });
+
+    // type coercion
+    if (updates.price != null) updates.price = Number(updates.price);
+    if (updates.stock != null) updates.stock = Number(updates.stock);
+    if (updates.category_id != null) updates.category_id = Number(updates.category_id);
+    if (updates.is_active != null) updates.is_active = !!updates.is_active;
+
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'No updatable fields provided' });
     }
@@ -508,6 +518,7 @@ app.patch('/products/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to update product', detail: err.message });
   }
 });
+
 
 
 // “Delete” => soft delete
@@ -532,31 +543,41 @@ app.get('/inventory', authenticate, async (req, res) => {
   try {
     const { data, error } = await supabase
       .schema('pos')
-      .from('product_vendors')
+      .from('products')
       .select(`
         product_id,
-        vendor_id,
-        supply_price,
-        lead_time_days,
-        preferred,
-        vendors (vendor_name, is_active),
-        products (product_name, sku, stock)
-      `);
+        product_name,
+        sku,
+        stock,
+        product_vendors (
+          supply_price,
+          lead_time_days,
+          preferred,
+          vendor_id,
+          vendors (
+            vendor_name
+          )
+        )
+      `)
+      .eq('is_active', true);
 
     if (error) throw error;
 
-    const inventory = data
-      .filter(row => row.vendors?.is_active) // ✅ filter out inactive vendors
-      .map(row => ({
-        product_id: row.product_id,
-        sku: row.products?.sku,
-        product_name: row.products?.product_name,
-        stock: row.products?.stock,
-        vendor_name: row.vendors?.vendor_name,
-        supply_price: row.supply_price,
-        preferred: row.preferred,
-        lead_time_days: row.lead_time_days
-      }));
+    // Flatten data into rows for table
+    const inventory = data.map(p => {
+      const vendorInfo = p.product_vendors?.[0] || {};
+      return {
+        product_id: p.product_id,
+        product_name: p.product_name,
+        sku: p.sku,
+        stock: p.stock,
+        supply_price: vendorInfo.supply_price || null,
+        lead_time_days: vendorInfo.lead_time_days || null,
+        preferred: vendorInfo.preferred || false,
+        vendor_id: vendorInfo.vendor_id || null,
+        vendor_name: vendorInfo.vendors?.vendor_name || null
+      };
+    });
 
     res.json({ inventory });
   } catch (err) {
@@ -564,6 +585,7 @@ app.get('/inventory', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch inventory' });
   }
 });
+
 
 
 
@@ -584,25 +606,42 @@ app.get('/vendors', authenticate, async (req, res) => {
 
 
 // POST /inventory/order — create restock order
+// FILE: backend/index.js (replace only the /inventory/order route)
+
 app.post('/inventory/order', authenticate, async (req, res) => {
-  const { product_id, vendor_id, quantity } = req.body;
-  const user_id = req.user.sub;
+  try {
+    const { product_id, vendor_id, quantity } = req.body;
+    const user_id = req.user?.sub; // numeric user_id from your JWT
 
-  const { data, error } = await supabase
-    .schema('pos')
-    .from('restock_orders')
-    .insert({
+    if (!product_id || !quantity) {
+      return res.status(400).json({ error: 'product_id and quantity are required' });
+    }
+
+    // Build minimal payload; let DB defaults handle status/timestamps
+    const payload = {
       product_id,
-      vendor_id,
+      vendor_id: vendor_id ?? null,
       quantity,
-      requested_by: user_id
-    })
-    .select('*')
-    .single();
+      requested_by: user_id ?? null // BIGINT if you applied the schema change above
+    };
 
-  if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json({ order: data });
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('restock_orders')
+      .insert(payload)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    return res.status(201).json({ order: data });
+  } catch (err) {
+    console.error('Order failed:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
 });
+
+
 
 // GET /vendors — only active
 app.get('/vendors', authenticate, async (req, res) => {
@@ -674,6 +713,105 @@ app.delete('/vendors/:id', authenticate, async (req, res) => {
     .eq('vendor_id', req.params.id);
   if (error) return res.status(500).json({ error: error.message });
   res.status(204).end();
+});
+
+// GET /restock/orders — list restock orders
+app.get('/restock/orders', authenticate, async (req, res) => {
+  try {
+    // If your FK constraints exist, this nested select will work and include names
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('restock_orders')
+      .select(`
+        restock_id,
+        product_id,
+        vendor_id,
+        quantity,
+        status,
+        requested_by,
+        requested_at,
+        updated_at,
+        expected_delivery,
+        products:product_id ( product_name ),
+        vendors:vendor_id ( vendor_name )
+      `)
+      .order('requested_at', { ascending: false });
+
+    if (error) throw error;
+    res.json({ orders: data || [] });
+  } catch (err) {
+    console.error('Error fetching restock orders:', err);
+    res.status(500).json({ error: 'Failed to fetch restock orders' });
+  }
+});
+
+// GET /restock/deliveries — list restock deliveries (newer first)
+app.get('/restock/deliveries', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('restock_deliveries')
+      .select(`
+        delivery_id,
+        restock_id,
+        product_id,
+        quantity_received,
+        received_at,
+        notes,
+        products:product_id ( product_name )
+      `)
+      .order('received_at', { ascending: false });
+
+    if (error) throw error;
+    res.json({ deliveries: data || [] });
+  } catch (err) {
+    console.error('Error fetching restock deliveries:', err);
+    res.status(500).json({ error: 'Failed to fetch restock deliveries' });
+  }
+});
+
+// GET /inventory/worth — total retail value of active inventory
+app.get('/inventory/worth', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('products')
+      .select('price, stock')
+      .eq('is_active', true);
+
+    if (error) throw error;
+
+    const totalWorth = (data || []).reduce((sum, p) => {
+      const price = Number(p.price ?? 0);
+      const stock = Number(p.stock ?? 0);
+      if (Number.isFinite(price) && Number.isFinite(stock)) {
+        return sum + price * stock;
+      }
+      return sum;
+    }, 0);
+
+    res.json({ totalWorth });
+  } catch (err) {
+    console.error('Error computing inventory worth:', err);
+    res.status(500).json({ error: 'Failed to compute inventory worth' });
+  }
+});
+
+app.get('/products/inactive', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .schema('pos')
+      .from('products')
+      .select('*')
+      .eq('is_active', false);
+
+    if (error) throw error;
+
+    res.json({ products: data });
+  } catch (err) {
+    console.error('Error fetching inactive products:', err);
+    res.status(500).json({ error: 'Failed to fetch inactive products' });
+  }
 });
 
 
