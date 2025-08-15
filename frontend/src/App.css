@@ -1,0 +1,155 @@
+/* Remove default browser margin and padding */
+body, html {
+  margin: 0;
+  padding: 0;
+}
+.App {
+  background-color: rgb(255, 255, 255);
+  color: #4B5043 ;
+  min-height: 100vh;
+  padding: 2rem;
+  text-align: center;
+  font-family: raleway, sans-serif;
+  font-size: 16px;
+}
+input {
+  border: 1px solid #070707b6;
+  border-radius: 5px;
+  font-family: Georgia, 'Times New Roman', Times, serif;
+}
+button {
+  padding: 10px 20px;
+  font-size: 16px;
+  cursor: pointer;
+}
+pre {
+  background-color: #603333;
+  padding: 10px;
+  border-radius: 50px;
+}
+h1 {
+  color: #4B5043 ;
+  font-size: 24px;
+  margin-bottom: 20px;
+  font-weight: Medium;
+}
+h2 {
+  color: #4B5043 ;
+  font-size: 20px;
+  margin-top: 30px;
+}
+h3 {
+  color: #000000;
+  font-size: 18px;
+  margin-top: 20px;
+}
+.error {
+  color: rgb(232, 155, 155);
+  font-weight: bold;
+  margin-top: 20px;
+}
+.success {
+  color: rgb(33, 222, 20);
+  font-weight: bold;       
+  margin-top: 20px;
+}
+.result { 
+  margin-top: 20px;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 5px;
+  background-color: #f9f9f9;        
+  max-height: 400px;
+  overflow-y: auto;
+}
+.result pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.result h3 {
+  margin-top: 0;
+  font-size: 16px;
+  color: #333;
+}
+.result h4 {
+  margin-top: 10px;
+  font-size: 14px;
+  color: #555;
+}
+.result p {
+  margin: 5px 0;
+  font-size: 14px;
+  color: #666;
+}
+.result ul {
+  list-style-type: disc;
+  padding-left: 20px;
+}
+.result li {
+  margin: 5px 0;
+  font-size: 14px;
+  color: #666;
+}
+.result table {
+  width: 50%;
+  border-collapse: collapse;
+  margin-top: 20px;
+}
+.result th, .result td {
+  border: 1px solid #ffffff;
+  padding: 8px;
+  text-align: left;
+}
+.result th {
+  background-color: #ffffff;
+  font-weight: bold;
+}
+.result td {
+  background-color: #fff;
+}
+.result code {
+  background-color: #ffffff;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: monospace;
+}
+.sidebar {
+  position: fixed;
+  top: 60px; /* height of your header (10px padding + ~1.5rem font) */
+  left: 0;
+  bottom: 0;
+  width: 200px;
+  background-color: #111;
+  color: #fff;
+  padding-top: 20px;
+}
+
+.sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar li {
+  padding: 15px 20px;
+  cursor: pointer;
+}
+
+.sidebar li:hover {
+  background-color: #333;
+}
+
+.dashboard-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 2rem; /* space between cards */
+  padding: 2rem;
+}
+.card {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  padding: 1.5rem;
+  min-width: 0;
+}
