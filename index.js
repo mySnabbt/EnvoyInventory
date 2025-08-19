@@ -6,6 +6,8 @@ import bcrypt   from 'bcryptjs';
 import OpenAI   from 'openai';
 import supabase from './db.js';
 import jwt from 'jsonwebtoken'
+import multer from 'multer';
+import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
 
@@ -92,42 +94,50 @@ app.patch(
 
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password required' });
+  }
 
-  // fetch the user record (including password_hash)
   const { data: user, error } = await supabase
     .schema('pos')
     .from('users')
-    .select('user_id, first_name, last_name, email, password_hash, role_id, designation')
+    .select(
+      'user_id, first_name, last_name, email, password_hash, role_id, designation, avatar_path'
+    )
     .eq('email', email)
     .single();
 
-  if (error || !user) return res.status(401).json({ error: 'Invalid credentials' });
+  if (error || !user) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
 
-  // compare password
   const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+  if (!valid) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
 
-  // sign a token (expires in 1h)
   const token = jwt.sign(
     { sub: user.user_id, email: user.email, role: user.role_id },
     process.env.JWT_SECRET,
     { expiresIn: '1h' }
   );
 
-  // return token plus any user info you want front end to know
+  const avatar_url = getAvatarPublicUrl(user.avatar_path);
+
   res.json({
     token,
     user: {
-        user_id:    user.user_id,
-        first_name: user.first_name,
-        last_name:  user.last_name,
-        email:      user.email,
-        designation:user.designation,
-        role_id:    user.role_id    // ← include the role
-      }
+      user_id: user.user_id,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      email: user.email,
+      designation: user.designation,
+      role_id: user.role_id,
+      avatar_url,
+    },
   });
 });
+
 
 function authenticate(req, res, next) {
   const auth = req.headers.authorization || '';
@@ -779,10 +789,9 @@ app.delete('/vendors/:id', authenticate, async (req, res) => {
   res.status(204).end();
 });
 
-// GET /restock/orders — list restock orders
+// GET /restock/orders — list only non-completed
 app.get('/restock/orders', authenticate, async (req, res) => {
   try {
-    // If your FK constraints exist, this nested select will work and include names
     const { data, error } = await supabase
       .schema('pos')
       .from('restock_orders')
@@ -796,18 +805,21 @@ app.get('/restock/orders', authenticate, async (req, res) => {
         requested_at,
         updated_at,
         expected_delivery,
-        products:product_id ( product_name ),
-        vendors:vendor_id ( vendor_name )
+        products:product_id(product_name),
+        vendors:vendor_id(vendor_name)
       `)
+      .neq('status', 'COMPLETED') // hide completed
       .order('requested_at', { ascending: false });
 
     if (error) throw error;
-    res.json({ orders: data || [] });
+
+    return res.json({ orders: data || [] });
   } catch (err) {
     console.error('Error fetching restock orders:', err);
-    res.status(500).json({ error: 'Failed to fetch restock orders' });
+    return res.status(500).json({ error: 'Failed to fetch restock orders' });
   }
 });
+
 
 // GET /restock/deliveries — list restock deliveries (newer first)
 app.get('/restock/deliveries', authenticate, async (req, res) => {
@@ -833,6 +845,42 @@ app.get('/restock/deliveries', authenticate, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch restock deliveries' });
   }
 });
+
+// POST /restock/orders/:id/deliver
+app.post(
+  '/restock/orders/:id/deliver',
+  authenticate,
+  requireRole(2, 3),
+  async (req, res) => {
+    try {
+      const restockId = Number(req.params.id);
+      if (!restockId) {
+        return res.status(400).json({ error: 'Invalid restock id' });
+      }
+
+      const notes = req.body?.notes ?? null;
+
+      const { data, error } = await supabase.rpc(
+        'pos_mark_restock_order_delivered',
+        {
+          p_restock_id: restockId,
+          p_notes: notes,
+        }
+      );
+
+      if (error) throw error;
+
+      return res.json({ delivery: data });
+    } catch (err) {
+      console.error('Deliver restock order failed:', err);
+      return res.status(500).json({
+        error: 'Failed to mark delivered',
+        detail: err.message,
+      });
+    }
+  }
+);
+
 
 // GET /inventory/worth — total retail value of active inventory
 app.get('/inventory/worth', authenticate, async (req, res) => {
@@ -877,6 +925,166 @@ app.get('/products/inactive', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch inactive products' });
   }
 });
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5 MB
+  },
+});
+
+function getAvatarPublicUrl(path) {
+  if (!path) return null;
+
+  const { data } = supabase.storage.from('avatars').getPublicUrl(path);
+  return data?.publicUrl || null;
+}
+
+app.get('/me', authenticate, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .schema('pos')
+      .from('users')
+      .select(
+        'user_id, first_name, last_name, email, designation, role_id, avatar_path'
+      )
+      .eq('user_id', req.user.sub)
+      .single();
+
+    if (error) throw error;
+
+    const avatar_url = getAvatarPublicUrl(user.avatar_path);
+    res.json({ user: { ...user, avatar_url } });
+
+  } catch (err) {
+    console.error('GET /me failed:', err);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+app.post(
+  '/users/:id/avatar',
+  authenticate,
+  upload.single('avatar'),
+  async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      if (!targetId) {
+        return res.status(400).json({ error: 'Invalid user id' });
+      }
+
+      // Only self or manager/admin can update
+      const callerRole = Number(req.user.role);
+      const isSelf = req.user.sub === targetId;
+      if (!isSelf && !(callerRole === 2 || callerRole === 3)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      const bytes = req.file.buffer;
+      const mime = req.file.mimetype || 'image/jpeg';
+      const ext =
+        (req.file.originalname || '').split('.').pop()?.toLowerCase() || 'jpg';
+
+      // Optional: basic MIME guard
+      if (!['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(mime)) {
+        return res.status(400).json({ error: 'Unsupported image type' });
+      }
+
+      // Make a unique key per user; upsert to replace in-place
+      const key = `user_${targetId}/${uuidv4()}.${ext}`;
+
+      // Upload
+      const { error: upErr } = await supabase.storage
+        .from('avatars')
+        .upload(key, bytes, { contentType: mime, upsert: true });
+
+      if (upErr) throw upErr;
+
+      // Fetch previous avatar_path to delete old file
+      const { data: prev, error: prevErr } = await supabase
+        .schema('pos')
+        .from('users')
+        .select('avatar_path')
+        .eq('user_id', targetId)
+        .single();
+
+      if (prevErr) throw prevErr;
+
+      // Save new path
+      const { error: updErr } = await supabase
+        .schema('pos')
+        .from('users')
+        .update({ avatar_path: key, avatar_updated_at: new Date().toISOString() })
+        .eq('user_id', targetId);
+
+      if (updErr) throw updErr;
+
+      // Delete previous file (best-effort)
+      if (prev?.avatar_path && prev.avatar_path !== key) {
+        await supabase.storage.from('avatars').remove([prev.avatar_path]);
+      }
+
+      const avatar_url = getAvatarPublicUrl(key);
+      res.json({ avatar_url });
+    } catch (err) {
+      console.error('Upload avatar failed:', err);
+      res.status(500).json({ error: 'Failed to upload avatar', detail: err.message });
+    }
+  }
+);
+
+app.delete(
+  '/users/:id/avatar',
+  authenticate,
+  async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      if (!targetId) {
+        return res.status(400).json({ error: 'Invalid user id' });
+      }
+
+      // Only self or manager/admin can delete
+      const callerRole = Number(req.user.role);
+      const isSelf = req.user.sub === targetId;
+      if (!isSelf && !(callerRole === 2 || callerRole === 3)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      // Fetch current avatar
+      const { data: user, error } = await supabase
+        .schema('pos')
+        .from('users')
+        .select('avatar_path')
+        .eq('user_id', targetId)
+        .single();
+
+      if (error) throw error;
+
+      // Delete file from storage if exists
+      if (user?.avatar_path) {
+        await supabase.storage.from('avatars').remove([user.avatar_path]);
+      }
+
+      // Clear avatar_path in database
+      const { error: updErr } = await supabase
+        .schema('pos')
+        .from('users')
+        .update({ avatar_path: null, avatar_updated_at: new Date().toISOString() })
+        .eq('user_id', targetId);
+
+      if (updErr) throw updErr;
+
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Delete avatar failed:', err);
+      res.status(500).json({ error: 'Failed to delete avatar', detail: err.message });
+    }
+  }
+);
 
 
 

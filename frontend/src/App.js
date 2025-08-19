@@ -8,6 +8,7 @@ import TotalInventoryWorthCard from './TotalInventoryWorthCard';
 import InventoryTable from './InventoryTable';
 import VendorTable from './VendorTable';
 import LoginPage from './LoginPage';
+import ProfileTab from './ProfileTab';
 import RevenueInsightsCard from './RevenueInsightsCard';
 import { message } from 'antd';
 import OrdersDeliveriesPage from "./OrdersDeliveriesPage";
@@ -345,13 +346,30 @@ function App() {
   };
 
   const fetchUsers = () => {
-  fetch(`${API_URL}/users`, {
-    headers: { Authorization: `Bearer ${token}` }
-  })
-    .then(r=>r.json())
-    .then(j=>setUsers(j.users))
-    .catch(console.error);
-};
+    fetch(`${API_URL}/users`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(r=>r.json())
+      .then(j=>setUsers(j.users))
+      .catch(console.error);
+  };
+
+  function UserAvatar({ user }) {
+    const initials = (
+      (user?.first_name?.[0] || '') + (user?.last_name?.[0] || '')
+    ).toUpperCase();
+
+    return (
+      <div className="h-9 w-9 rounded-full overflow-hidden bg-muted flex items-center justify-center text-sm font-medium">
+        {user?.avatar_url ? (
+          <img src={user.avatar_url} alt="avatar" className="h-full w-full object-cover" />
+        ) : (
+          <span>{initials || '👤'}</span>
+        )}
+      </div>
+    );
+  }
+
 
   useEffect(() => {
     if (activeTab==='Users') fetchUsers();
@@ -480,9 +498,15 @@ function App() {
           <li
             onClick={() => setActiveTab('Profile')}
             className={activeTab === 'Profile' ? 'active' : ''}
-            style={{ paddingLeft : '3.5rem' ,display: 'flex' , alignItems: 'center', gap: '0.5rem' }}
+            style={{
+              paddingLeft: '3.5rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+            }}
           >
-            <img src={avatarUrl} alt="avatar" style={{ width: 24, height: 24, borderRadius: '50%' }} />
+            {/* Replace <img> with UserAvatar */}
+            <UserAvatar user={currentUser} />
             Profile
           </li>
         </ul>
@@ -733,29 +757,9 @@ function App() {
 
         {/* PROFILE TAB */}
         {activeTab === 'Profile' && (
-          <div style={{ padding: '2rem' }}>
-            <h2>My Profile</h2>
-            {currentUser && (
-              <p><strong>Name:</strong> {currentUser.first_name} {currentUser.last_name}</p>
-            )}
-            <p><strong>Email:</strong> {currentUser.email}</p>
-            <p><strong>Designation:</strong> {currentUser.designation}</p>
-            <button
-              onClick={handleLogout}
-              style={{
-                marginTop: '1.5rem',
-                padding: '0.5rem 1rem',
-                backgroundColor: '#c0392b',
-                color: 'white',
-                border: 'none',
-                borderRadius: 4,
-                cursor: 'pointer'
-              }}
-            >
-              Logout
-            </button>
-          </div>
+          <ProfileTab token={token} onUserUpdate={(u) => setCurrentUser(u)} />
         )}
+
       </div>
     </div>
   );

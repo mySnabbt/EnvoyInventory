@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "./components/ui/card";
 import {
   Table,
@@ -42,8 +42,9 @@ export default function OrdersDeliveriesPage({ token }) {
   const [orders, setOrders] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(null); // restock_id being processed
 
-  const fetchAll = async () => {
+  const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
       const [oRes, dRes] = await Promise.all([
@@ -57,8 +58,8 @@ export default function OrdersDeliveriesPage({ token }) {
 
       const [oJson, dJson] = await Promise.all([oRes.json(), dRes.json()]);
 
-      if (!oRes.ok) throw new Error(oJson.error || "Failed to load restock orders");
-      if (!dRes.ok) throw new Error(dJson.error || "Failed to load restock deliveries");
+      if (!oRes.ok) throw new Error(oJson.error || 'Failed to load restock orders');
+      if (!dRes.ok) throw new Error(dJson.error || 'Failed to load restock deliveries');
 
       setOrders(oJson.orders || []);
       setDeliveries(dJson.deliveries || []);
@@ -67,7 +68,42 @@ export default function OrdersDeliveriesPage({ token }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
+
+  useEffect(() => {
+    fetchAll();
+  }, [fetchAll]);
+
+
+  const markDelivered = useCallback(
+    async (restockId) => {
+      try {
+        setActionLoading(restockId);
+
+        const res = await fetch(`${API_URL}/restock/orders/${restockId}/deliver`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({}), // or { notes: '...' }
+        });
+
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || 'Failed to mark delivered');
+
+        // refresh both tables
+        await fetchAll();
+      } catch (err) {
+        console.error('Mark delivered failed:', err);
+        window.alert(err.message || 'Failed to mark delivered');
+      } finally {
+        setActionLoading(null);
+      }
+    },
+    [token] // optionally include fetchAll if your linter requires it
+  );
+
 
   useEffect(() => {
     fetchAll();
@@ -108,7 +144,22 @@ export default function OrdersDeliveriesPage({ token }) {
     { key: "requested_at", label: "Requested At", className: "whitespace-nowrap", render: fmtDate },
     { key: "expected_delivery", label: "Expected", className: "whitespace-nowrap", render: fmtDate },
     { key: "updated_at", label: "Updated", className: "whitespace-nowrap", render: fmtDate },
-  ], []);
+    {
+      key: "actions",
+      label: "Actions",
+      className: "w-[140px]",
+      render: (_, row) => (
+        <button
+          onClick={() => markDelivered(row.restock_id)}
+          disabled={actionLoading === row.restock_id}
+          className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-60"
+          title="Mark as delivered"
+        >
+          {actionLoading === row.restock_id ? "Saving…" : "Delivered"}
+        </button>
+      ),
+    },
+  ], [markDelivered, actionLoading]);
 
   const deliveryColumns = useMemo(() => [
     { key: "delivery_id", label: "ID", className: "w-[80px] whitespace-nowrap" },
