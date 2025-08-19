@@ -16,9 +16,9 @@ import OrdersDeliveriesPage from "./OrdersDeliveriesPage";
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
 
 function App() {
-  const [token, setToken] = useState(localStorage.getItem('token')||'');
-  const [currentUser, setCurrentUser] = useState(JSON.parse(localStorage.getItem('user'))||null);
-  const [activeTab, setActiveTab] = useState('Dashboard');
+  const [token, setToken] = useState('');
+  const [currentUser, setCurrentUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('Login');
   const [question, setQuestion] = useState('');
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -59,6 +59,8 @@ function App() {
   function handleLoginSuccess(token, user) {
     setToken(token);
     setCurrentUser(user);
+    setActiveTab('Dashboard'); // 👈 jump to Dashboard after login
+
     localStorage.setItem('token', token);
     localStorage.setItem('user', JSON.stringify(user));
   }
@@ -757,7 +759,7 @@ function App() {
 
         {/* PROFILE TAB */}
         {activeTab === 'Profile' && (
-          <ProfileTab token={token} onUserUpdate={(u) => setCurrentUser(u)} />
+          <ProfileTab token={token} onUserUpdate={setCurrentUser} onLogout={handleLogout} />
         )}
 
       </div>
