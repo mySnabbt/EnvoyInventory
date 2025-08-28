@@ -547,7 +547,7 @@ function App() {
 
             {/* Stock (same height as Revenue) */}
             <div className="col-span-1 md:col-span-3 xl:col-span-4 xl:row-start-1 xl:h-[380px]">
-              <StockDistributionChart />
+              <StockDistributionChart token={token} apiUrl={API_URL} />
             </div>
 
             {/* Monthly Revenue (chart only, no Card inside) */}

@@ -244,7 +244,7 @@ app.post('/ask', async (req, res) => {
     console.log('📄 Extracted SQL:', sql);
 
     // 7. Run it on Supabase
-    const { data, error } = await supabase.rpc('execute_raw_sql', { sql_text: sql });
+    const { data, error } = await supabase.rpc('execute_analytics_sql', { p_sql: sql });
     if (error) {
       console.error('❌ Supabase error:', error);
       return res.status(500).json({ error: 'Supabase query failed', detail: error.message });
@@ -1085,6 +1085,63 @@ app.delete(
     }
   }
 );
+
+// GET /inventory/stock-by-category?metric=units|value
+// Returns { metric, labels, data, breakdown[] }
+app.get('/inventory/stock-by-category', authenticate, async (req, res) => {
+  try {
+    const metric = (req.query.metric || 'units').toLowerCase(); // 'units' or 'value'
+
+    // Fetch minimal product fields
+    const [{ data: products, error: pErr }, { data: cats, error: cErr }] = await Promise.all([
+      supabase
+        .schema('pos')
+        .from('products')
+        .select('category_id, stock, price, is_active')
+        .eq('is_active', true),
+      supabase
+        .schema('pos')
+        .from('categories')
+        .select('category_id, category_name')
+    ]);
+
+    if (pErr) throw pErr;
+    if (cErr) throw cErr;
+
+    const nameForId = new Map((cats || []).map(c => [c.category_id, c.category_name]));
+    const UNCATEGORIZED = 'Uncategorized';
+
+    // Aggregate
+    const agg = new Map(); // name -> { name, units, value }
+    for (const p of products || []) {
+      const name = nameForId.get(p.category_id) || UNCATEGORIZED;
+      const stock = Number(p.stock ?? 0);
+      const price = Number(p.price ?? 0);
+
+      if (!agg.has(name)) agg.set(name, { name, units: 0, value: 0 });
+      const slot = agg.get(name);
+      slot.units += Number.isFinite(stock) ? stock : 0;
+      slot.value += (Number.isFinite(stock) && Number.isFinite(price)) ? stock * price : 0;
+    }
+
+    // Build response sorted by selected metric (desc)
+    const breakdown = Array.from(agg.values()).sort((a, b) =>
+      (metric === 'value' ? b.value - a.value : b.units - a.units)
+    );
+
+    const labels = breakdown.map(x => x.name);
+    const data = breakdown.map(x => metric === 'value'
+      ? Number(x.value.toFixed(2))
+      : x.units
+    );
+
+    res.json({ metric, labels, data, breakdown });
+  } catch (err) {
+    console.error('Error computing stock-by-category:', err);
+    res.status(500).json({ error: 'Failed to compute stock by category' });
+  }
+});
+
 
 
 
