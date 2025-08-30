@@ -18,6 +18,23 @@ app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+function unwrapExecuteResult(data) {
+  // If the RPC already returned the array
+  if (Array.isArray(data)) return data;
+
+  // If you ever call the function via SELECT execute_analytics_sql(...) AS execute_analytics_sql
+  if (data && Array.isArray(data.execute_analytics_sql)) return data.execute_analytics_sql;
+
+  // If the driver coerced JSONB into a string (rare), try to parse
+  if (data && typeof data.execute_analytics_sql === 'string') {
+    try {
+      const arr = JSON.parse(data.execute_analytics_sql);
+      if (Array.isArray(arr)) return arr;
+    } catch { /* ignore */ }
+  }
+  return [];
+}
+
 
 function requireRole(...allowedRoles) {
   return (req, res, next) => {
@@ -250,12 +267,14 @@ app.post('/ask', async (req, res) => {
       return res.status(500).json({ error: 'Supabase query failed', detail: error.message });
     }
 
-    console.log(`📊 Supabase returned ${data?.[0]?.result?.length ?? 0} rows.`);
+    const rows = unwrapExecuteResult(data);
+    console.log(`📊 Supabase returned ${rows.length} rows.`);
 
     const endTime = Date.now();
     console.log(`✅ Request completed in ${endTime - startTime}ms`);
 
-    res.json({ result: data?.[0]?.result ?? [], sqlQuery: sql });
+    // Return the unwrapped rows
+    res.json({ result: rows, sqlQuery: sql });
 
   } catch (err) {
     console.error('🔥 Assistant error:', err);
